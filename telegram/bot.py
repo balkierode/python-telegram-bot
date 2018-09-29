@@ -25,6 +25,7 @@ try:
     import ujson as json
 except ImportError:
     import json
+
 import logging
 import warnings
 from datetime import datetime
@@ -40,8 +41,38 @@ from telegram import (User, Message, Update, Chat, ChatMember, UserProfilePhotos
 from telegram.error import InvalidToken, TelegramError
 from telegram.utils.helpers import to_timestamp
 from telegram.utils.request import Request
+import aiohttp
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
+
+
+class SyncRequest:
+    def __init__(self):
+        self._request = Request()
+
+    def post(self, url, data, timeout, cb):
+        result = self._request.post(url, data, timeout)
+        if cb:
+            return cb(result)
+        return result
+
+
+class AsyncRequest:
+    def __init__(self):
+        self.session = aiohttp.ClientSession()
+
+    async def post(self, url, data, timeout, cb):
+        if InputFile.is_inputfile(data):
+            data = InputFile(data).to_form()
+        else:
+            data = json.dumps(data).encode()
+        result = await self.session.post(url, data)
+        # noinspection PyProtectedMember
+        result = Request._parse(result.text())
+        print(result)
+        if cb:
+            return cb(result)
+        return result
 
 
 def info(func):
@@ -124,7 +155,7 @@ class Bot(TelegramObject):
         self.base_url = str(base_url) + str(self.token)
         self.base_file_url = str(base_file_url) + str(self.token)
         self.bot = None
-        self._request = request or Request()
+        self._request = request or AsyncRequest()
         self.logger = logging.getLogger(__name__)
 
         if private_key:
@@ -1489,9 +1520,10 @@ class Bot(TelegramObject):
             data['limit'] = limit
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return UserProfilePhotos.de_json(result, self)
 
-        return UserProfilePhotos.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def get_file(self, file_id, timeout=None, **kwargs):
@@ -1531,12 +1563,13 @@ class Bot(TelegramObject):
         data = {'file_id': file_id}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            if result.get('file_path'):
+                result['file_path'] = '%s/%s' % (self.base_file_url, result['file_path'])
 
-        if result.get('file_path'):
-            result['file_path'] = '%s/%s' % (self.base_file_url, result['file_path'])
+            return File.de_json(result, self)
 
-        return File.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def kick_chat_member(self, chat_id, user_id, timeout=None, until_date=None, **kwargs):
@@ -1972,14 +2005,16 @@ class Bot(TelegramObject):
         # * Long polling poses a different problem: the connection might have been dropped while
         #   waiting for the server to return and there's no way of knowing the connection had been
         #   dropped in real time.
-        result = self._request.post(url, data, timeout=float(read_latency) + float(timeout))
 
-        if result:
-            self.logger.debug('Getting updates: %s', [u['update_id'] for u in result])
-        else:
-            self.logger.debug('No new updates found.')
+        def cb(result):
+            if result:
+                self.logger.debug('Getting updates: %s', [u['update_id'] for u in result])
+            else:
+                self.logger.debug('No new updates found.')
 
-        return [Update.de_json(u, self) for u in result]
+            return [Update.de_json(u, self) for u in result]
+
+        return self._request.post(url, data, timeout=float(read_latency) + float(timeout), cb=cb)
 
     @log
     def set_webhook(self,
@@ -2152,9 +2187,10 @@ class Bot(TelegramObject):
         data = {'chat_id': chat_id}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return Chat.de_json(result, self)
 
-        return Chat.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def get_chat_administrators(self, chat_id, timeout=None, **kwargs):
@@ -2184,9 +2220,10 @@ class Bot(TelegramObject):
         data = {'chat_id': chat_id}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return [ChatMember.de_json(x, self) for x in result]
 
-        return [ChatMember.de_json(x, self) for x in result]
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def get_chat_members_count(self, chat_id, timeout=None, **kwargs):
@@ -2241,9 +2278,10 @@ class Bot(TelegramObject):
         data = {'chat_id': chat_id, 'user_id': user_id}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return ChatMember.de_json(result, self)
 
-        return ChatMember.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def set_chat_sticker_set(self, chat_id, sticker_set_name, timeout=None, **kwargs):
@@ -2321,9 +2359,10 @@ class Bot(TelegramObject):
 
         data = kwargs
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return WebhookInfo.de_json(result, self)
 
-        return WebhookInfo.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     @message
@@ -2431,9 +2470,10 @@ class Bot(TelegramObject):
             data['inline_message_id'] = inline_message_id
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return [GameHighScore.de_json(hs, self) for hs in result]
 
-        return [GameHighScore.de_json(hs, self) for hs in result]
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     @message
@@ -3070,9 +3110,10 @@ class Bot(TelegramObject):
         data = {'name': name}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return StickerSet.de_json(result, self)
 
-        return StickerSet.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def upload_sticker_file(self, user_id, png_sticker, timeout=None, **kwargs):
@@ -3110,9 +3151,10 @@ class Bot(TelegramObject):
         data = {'user_id': user_id, 'png_sticker': png_sticker}
         data.update(kwargs)
 
-        result = self._request.post(url, data, timeout=timeout)
+        def cb(result):
+            return File.de_json(result, self)
 
-        return File.de_json(result, self)
+        return self._request.post(url, data, timeout=timeout, cb=cb)
 
     @log
     def create_new_sticker_set(self, user_id, name, title, png_sticker, emojis,
